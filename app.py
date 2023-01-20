@@ -47,11 +47,17 @@ app.layout = html.Div([
     html.H2(children='Input search term'),
     html.Div([
         dcc.Input(
-            id='tt_input',
+            id='input1',
+            type='text',
+            placeholder=None,
+        ),
+        dcc.Input(
+            id='input2',
             type='text',
             placeholder=None,
         ),
         html.Button('Submit', id='submit-val', n_clicks=0),
+        html.Button('Update', id='update', n_clicks=0),
     ]),
     html.Div(id='progress_status', children='Enter a value and press submit'),
     html.Div(id='hist', children=[]),
@@ -63,6 +69,10 @@ emoji_pattern = re.compile("["
         u"\U0001F680-\U0001F6FF"  # transport & map symbols
         u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
                            "]+", flags=re.UNICODE)
+
+tag_dict = {}
+printer = None
+
 
 class IDPrinter(tweepy.StreamingClient):
     def __init__(self,academic_bearer):
@@ -76,11 +86,9 @@ class IDPrinter(tweepy.StreamingClient):
         text = msg['data']['text']
         global emoji_pattern
         tt.append(emoji_pattern.sub(r'', text))
+        global tag_dict
         for rule in msg['matching_rules']:
-          if(rule['id'] == "1616159160550178822"):
-            tags.append('biden')
-          else:
-            tags.append('trump')
+            tags.append(tag_dict[rule['id']])
         # print(str("_".join(tags)))
         tt.append(str("_".join(tags)))
         global spark
@@ -90,17 +98,13 @@ class IDPrinter(tweepy.StreamingClient):
         df = df.union(newRow)
 
 
-printer = IDPrinter(academic_bearer)
-printer.add_rules(tweepy.StreamRule("trump -is:reply -is:retweet -has:links lang:en"))
-printer.add_rules(tweepy.StreamRule("biden -is:reply -is:retweet -has:links lang:en"))
-printer.filter(threaded=True)
 @app.callback(
     Output("hist", "children"),
-    Input("submit-val", "n_clicks"),
+    Input("update", "n_clicks"),
     State("hist", "children"),
     prevent_initial_call=True
 )
-def show_graph(state, children):
+def show_graph(n_clicks, children):
     # data = spark.read.format("csv").load('training.1600000.processed.noemoticon.csv')
     # old_columns = data.schema.names
     # new_columns = ["target", "id", "date", "flag", "user", "text"]
@@ -111,6 +115,7 @@ def show_graph(state, children):
     result_df = spark_result_df.withColumn('result_flatten', get_result(spark_result_df.result)).toPandas()
 
     fig = px.histogram(result_df, x='result_flatten', color='tags')
+    fig.update_layout(barmode='group')
     if len(children) > 0:
         children[0]["props"]["figure"] = fig
     else:
@@ -122,6 +127,31 @@ def show_graph(state, children):
 
     return children
 
+@app.callback(
+    Output('progress_status', 'children'),
+    State('input1', 'value'),
+    State('input2', 'value'),
+    Input("submit-val", "n_clicks"),
+    prevent_initial_call=True
+)
+def set_tags(input1, input2, n_clicks):
+    global printer
+    if printer:
+        printer.disconnect()
+        printer.delete_rules(list(tag_dict.keys()))
+        global spark
+        global schema
+        global df
+        RDD = spark.sparkContext.emptyRDD()
+        df = spark.createDataFrame(RDD,schema)
+    else:
+        printer = IDPrinter(academic_bearer)
+    printer.add_rules(tweepy.StreamRule(f"{input1} -is:reply -is:retweet -has:links lang:en"))
+    printer.add_rules(tweepy.StreamRule(f"{input2} -is:reply -is:retweet -has:links lang:en"))
+    for rule in printer.get_rules()[0]:
+        tag_dict[rule[2]] = rule[0].replace(' -is:reply -is:retweet -has:links lang:en', '')
+    printer.filter(threaded=True)
+    return f"Tags: {input1}, {input2}"
 
 if __name__ == '__main__':
     app.run_server()
