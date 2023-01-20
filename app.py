@@ -44,7 +44,7 @@ app = dash.Dash('Twitter Sentiment Analysis')
 app.layout = html.Div([
     html.H1('Twitter Sentiment Analysis'),
     html.Br(),
-    html.H2(children='Input search term'),
+    html.H2(children='Input search terms'),
     html.Div([
         dcc.Input(
             id='input1',
@@ -57,10 +57,14 @@ app.layout = html.Div([
             placeholder=None,
         ),
         html.Button('Submit', id='submit-val', n_clicks=0),
-        html.Button('Update', id='update', n_clicks=0),
     ]),
     html.Div(id='progress_status', children='Enter a value and press submit'),
     html.Div(id='hist', children=[]),
+    dcc.Interval(
+            id='interval_component',
+            interval=10*1000, # in milliseconds
+            n_intervals=0
+    )
 ])
 
 emoji_pattern = re.compile("["
@@ -72,6 +76,7 @@ emoji_pattern = re.compile("["
 
 tag_dict = {}
 printer = None
+thread = None
 
 
 class IDPrinter(tweepy.StreamingClient):
@@ -100,21 +105,20 @@ class IDPrinter(tweepy.StreamingClient):
 
 @app.callback(
     Output("hist", "children"),
-    Input("update", "n_clicks"),
+    Input("interval_component", "n_intervals"),
     State("hist", "children"),
     prevent_initial_call=True
 )
-def show_graph(n_clicks, children):
+def show_graph(n_intervals, children):
     # data = spark.read.format("csv").load('training.1600000.processed.noemoticon.csv')
     # old_columns = data.schema.names
     # new_columns = ["target", "id", "date", "flag", "user", "text"]
     # spark_df = reduce(lambda data, idx: data.withColumnRenamed(old_columns[idx], new_columns[idx]), range(len(old_columns)), data)
     # sample = spark_df.sample(False, 0.1, seed=0)
-    sample = df.select(df.text, df.tags)
+    sample = df.select(df.text, df.tags)[df.tags.isin(list(tag_dict.values()))]
     spark_result_df = pipeline.transform(sample).select('text', 'tags', 'sentiment.result')
-    result_df = spark_result_df.withColumn('result_flatten', get_result(spark_result_df.result)).toPandas()
-
-    fig = px.histogram(result_df, x='result_flatten', color='tags')
+    result_df = spark_result_df.withColumn('sentiment', get_result(spark_result_df.result)).toPandas()
+    fig = px.histogram(result_df, x='sentiment', color='tags', category_orders={'sentiment': ['positive', 'negative', 'neutral']})
     fig.update_layout(barmode='group')
     if len(children) > 0:
         children[0]["props"]["figure"] = fig
@@ -136,21 +140,18 @@ def show_graph(n_clicks, children):
 )
 def set_tags(input1, input2, n_clicks):
     global printer
-    if printer:
-        printer.disconnect()
-        printer.delete_rules(list(tag_dict.keys()))
-        global spark
-        global schema
-        global df
-        RDD = spark.sparkContext.emptyRDD()
-        df = spark.createDataFrame(RDD,schema)
-    else:
+    global tag_dict
+    global thread
+    if not printer:
         printer = IDPrinter(academic_bearer)
+    printer.delete_rules([rule[2] for rule in printer.get_rules()[0]])
     printer.add_rules(tweepy.StreamRule(f"{input1} -is:reply -is:retweet -has:links lang:en"))
     printer.add_rules(tweepy.StreamRule(f"{input2} -is:reply -is:retweet -has:links lang:en"))
+    tag_dict = {}
     for rule in printer.get_rules()[0]:
         tag_dict[rule[2]] = rule[0].replace(' -is:reply -is:retweet -has:links lang:en', '')
-    printer.filter(threaded=True)
+    if not thread:
+        thread = printer.filter(threaded=True)
     return f"Tags: {input1}, {input2}"
 
 if __name__ == '__main__':
