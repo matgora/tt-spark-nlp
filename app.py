@@ -29,6 +29,14 @@ def get_result(x):
     return x[0]
 
 
+def get_tags(printer):
+    tag_dict = {}
+    for rule in printer.get_rules()[0]:
+        tag_dict[rule[2]] = rule[0].replace(' -is:reply -is:retweet -has:links lang:en', '')
+    return tag_dict
+
+
+
 args = parse_args()
 academic_bearer = "AAAAAAAAAAAAAAAAAAAAADIEawEAAAAAxzzD4cQ2g8FGK2%2BkKz2%2FJvTnoMA%3D09uegYs5HrQvrsFkAEl3WwxhspBYFBIH3Vnykec79asqiUsSoA"
 streaming = tweepy.StreamingClient(academic_bearer)
@@ -74,7 +82,6 @@ emoji_pattern = re.compile("["
         u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
                            "]+", flags=re.UNICODE)
 
-tag_dict = {}
 printer = None
 thread = None
 
@@ -91,10 +98,10 @@ class IDPrinter(tweepy.StreamingClient):
         text = msg['data']['text']
         global emoji_pattern
         tt.append(emoji_pattern.sub(r'', text))
-        global tag_dict
+        tag_dict = get_tags(self)
         for rule in msg['matching_rules']:
             tags.append(tag_dict[rule['id']])
-        # print(str("_".join(tags)))
+        print(str("_".join(tags)))
         tt.append(str("_".join(tags)))
         global spark
         global schema
@@ -110,11 +117,10 @@ class IDPrinter(tweepy.StreamingClient):
     prevent_initial_call=True
 )
 def show_graph(n_intervals, children):
-    # data = spark.read.format("csv").load('training.1600000.processed.noemoticon.csv')
-    # old_columns = data.schema.names
-    # new_columns = ["target", "id", "date", "flag", "user", "text"]
-    # spark_df = reduce(lambda data, idx: data.withColumnRenamed(old_columns[idx], new_columns[idx]), range(len(old_columns)), data)
-    # sample = spark_df.sample(False, 0.1, seed=0)
+    global printer
+    tag_dict = get_tags(printer)
+    print(printer.get_rules())
+    print(tag_dict)
     sample = df.select(df.text, df.tags)[df.tags.isin(list(tag_dict.values()))]
     spark_result_df = pipeline.transform(sample).select('text', 'tags', 'sentiment.result')
     result_df = spark_result_df.withColumn('sentiment', get_result(spark_result_df.result)).toPandas()
@@ -140,18 +146,14 @@ def show_graph(n_intervals, children):
 )
 def set_tags(input1, input2, n_clicks):
     global printer
-    global tag_dict
     global thread
-    if not printer:
-        printer = IDPrinter(academic_bearer)
+    if printer:
+        printer.disconnect()
+    printer = IDPrinter(academic_bearer)
     printer.delete_rules([rule[2] for rule in printer.get_rules()[0]])
     printer.add_rules(tweepy.StreamRule(f"{input1} -is:reply -is:retweet -has:links lang:en"))
     printer.add_rules(tweepy.StreamRule(f"{input2} -is:reply -is:retweet -has:links lang:en"))
-    tag_dict = {}
-    for rule in printer.get_rules()[0]:
-        tag_dict[rule[2]] = rule[0].replace(' -is:reply -is:retweet -has:links lang:en', '')
-    if not thread:
-        thread = printer.filter(threaded=True)
+    thread = printer.filter(threaded=True)
     return f"Tags: {input1}, {input2}"
 
 if __name__ == '__main__':
