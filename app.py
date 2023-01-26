@@ -11,13 +11,20 @@ import plotly.express as px
 import sparknlp
 from sparknlp.pretrained import PretrainedPipeline
 from pyspark.sql.types import StructType,StructField, StringType
-# test
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+from pyspark.sql.functions import col, split
+
 from functools import reduce
 import tweepy
 import pandas as pd
 import re
 import json
-
+from datetime import datetime
+import time
+from confluent_kafka import Producer
+import socket
 
 def parse_args():
     parser = ArgumentParser()
@@ -36,23 +43,24 @@ def get_tags(printer):
     return tag_dict
 
 
-
 args = parse_args()
 academic_bearer = "AAAAAAAAAAAAAAAAAAAAADIEawEAAAAAxzzD4cQ2g8FGK2%2BkKz2%2FJvTnoMA%3D09uegYs5HrQvrsFkAEl3WwxhspBYFBIH3Vnykec79asqiUsSoA"
 streaming = tweepy.StreamingClient(academic_bearer)
-spark = sparknlp.start()
+spark = SparkSession.builder.appName('twitter_app')\
+    .master("local[*]")\
+    .config('spark.jars.packages',
+            'org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.1,com.johnsnowlabs.nlp:spark-nlp_2.12:4.2.8')\
+    .config('spark.streaming.stopGracefullyOnShutdown', 'true')\
+    .config("spark.driver.memory","8G")\
+    .config("spark.driver.maxResultSize", "0") \
+    .config("spark.kryoserializer.buffer.max", "2000M")\
+    .getOrCreate()
 pipeline = PretrainedPipeline("analyze_sentimentdl_use_twitter", lang = "en")
-RDD = spark.sparkContext.emptyRDD()
-schema = StructType([
-  StructField('text', StringType(), True),
-  StructField('tags', StringType(), True)
-  ])
-df = spark.createDataFrame(RDD,schema)
 app = dash.Dash('Twitter Sentiment Analysis')
 app.layout = html.Div([
-    html.H1('Twitter Sentiment Analysis'),
+    html.H1('Nastawienie uzytkownikow Twittera'),
     html.Br(),
-    html.H2(children='Input search terms'),
+    html.H2(children='Wpisz tagi do porownania'),
     html.Div([
         dcc.Input(
             id='input1',
@@ -64,9 +72,9 @@ app.layout = html.Div([
             type='text',
             placeholder=None,
         ),
-        html.Button('Submit', id='submit-val', n_clicks=0),
+        html.Button('Zapisz', id='submit-val', n_clicks=0),
     ]),
-    html.Div(id='progress_status', children='Enter a value and press submit'),
+    html.Div(id='progress_status', children='Wpisz tagi i kliknij Zapisz'),
     html.Div(id='hist', children=[]),
     dcc.Interval(
             id='interval_component',
@@ -84,30 +92,45 @@ emoji_pattern = re.compile("["
 
 printer = None
 thread = None
+topic = 'tt'
+schema = StructType([
+  StructField('text', StringType(), True),
+  StructField('tags', StringType(), True)
+  ])
+df = spark \
+    .readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", topic) \
+    .load()
 
 
 class IDPrinter(tweepy.StreamingClient):
     def __init__(self,academic_bearer):
         super().__init__(academic_bearer)
+        conf = {'bootstrap.servers': "localhost:9092",
+        'client.id': socket.gethostname()}
+
+        self.producer = Producer(conf)
 
     def on_data(self, data):
-        msg = json.loads( data )
-        tags =[]
-        #print(msg['data']['text'])
-        tt = []
-        text = msg['data']['text']
-        global emoji_pattern
-        tt.append(emoji_pattern.sub(r'', text))
-        tag_dict = get_tags(self)
-        for rule in msg['matching_rules']:
-            tags.append(tag_dict[rule['id']])
-        print(str("_".join(tags)))
-        tt.append(str("_".join(tags)))
-        global spark
-        global schema
-        global df
-        newRow = spark.createDataFrame([tt], schema)
-        df = df.union(newRow)
+        try:
+            msg = json.loads( data )
+            tags =[]
+            #print(msg['data']['text'])
+            tt = {}
+            text = msg['data']['text']
+            global emoji_pattern
+            tt['text'] = (emoji_pattern.sub(r'', text))
+            tag_dict = get_tags(self)
+            for rule in msg['matching_rules']:
+                tags.append(tag_dict[rule['id']])
+            print(str("_".join(tags)))
+            tt['tags'] = (str("_".join(tags)))
+            global topic
+            self.producer.produce(topic, key=str(time.time()).encode(), value=json.dumps(tt))
+        except Exception as err:
+            print(f"Unexpected {err=}, {type(err)=}")
 
 
 @app.callback(
@@ -121,11 +144,26 @@ def show_graph(n_intervals, children):
     tag_dict = get_tags(printer)
     print(printer.get_rules())
     print(tag_dict)
-    sample = df.select(df.text, df.tags)[df.tags.isin(list(tag_dict.values()))]
-    spark_result_df = pipeline.transform(sample).select('text', 'tags', 'sentiment.result')
+    input1 = list(tag_dict.values())[0]
+    input2 = list(tag_dict.values())[1]
+    text_df = spark.read.format('parquet').load(f"tmp/output_dir").select('key', 'text', 'tags').filter(f"tags in ('{input1}', '{input2}')")
+    spark_result_df = pipeline.transform(text_df).select('key', 'text', 'tags', 'sentiment.result')
     result_df = spark_result_df.withColumn('sentiment', get_result(spark_result_df.result)).toPandas()
-    fig = px.histogram(result_df, x='sentiment', color='tags', category_orders={'sentiment': ['positive', 'negative', 'neutral']})
+    fig = px.histogram(
+        result_df,
+        x='sentiment',
+        color='tags',
+        category_orders={'sentiment': ['positive', 'negative', 'neutral']},
+        color_discrete_map={ # replaces default color mapping by value
+                input1: "#1f77b4", input2: "#d62728"
+            },
+    )
     fig.update_layout(barmode='group')
+    fig.update_layout(
+        title="Suma pozytywnych, negatywnych i neutralnych wpisow",
+        xaxis_title='Tag',
+        yaxis_title='Suma'
+    )
     if len(children) > 0:
         children[0]["props"]["figure"] = fig
     else:
@@ -136,6 +174,7 @@ def show_graph(n_intervals, children):
         )
 
     return children
+
 
 @app.callback(
     Output('progress_status', 'children'),
@@ -154,7 +193,18 @@ def set_tags(input1, input2, n_clicks):
     printer.add_rules(tweepy.StreamRule(f"{input1} -is:reply -is:retweet -has:links lang:en"))
     printer.add_rules(tweepy.StreamRule(f"{input2} -is:reply -is:retweet -has:links lang:en"))
     thread = printer.filter(threaded=True)
-    return f"Tags: {input1}, {input2}"
+    df_select1 = df.select((from_json(col("value").cast("string"), schema)).alias('text'), col('topic'), col('key').cast('string'))
+    text_df = df_select1.select('key',
+                          col('text.tags').alias('tags'),
+                          col('text.text').alias('text'),
+                          'topic')
+    text_df.writeStream \
+        .format("parquet") \
+        .option("checkpointLocation", f"tmp/checkpoint") \
+        .option("path", f"tmp/output_dir") \
+        .start()
+    return f"Tagi: {input1}, {input2}"
+
 
 if __name__ == '__main__':
     app.run_server()
