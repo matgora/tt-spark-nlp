@@ -28,7 +28,7 @@ import socket
 
 def parse_args():
     parser = ArgumentParser()
-    parser.add_argument('--api-key', '--k', type=str, help='Twitter API key')
+    parser.add_argument('--api-key', '--k', type=str, help='Twitter API key', required=True)
     return parser.parse_args()
 
 
@@ -44,7 +44,7 @@ def get_tags(printer):
 
 
 args = parse_args()
-academic_bearer = "AAAAAAAAAAAAAAAAAAAAADIEawEAAAAAxzzD4cQ2g8FGK2%2BkKz2%2FJvTnoMA%3D09uegYs5HrQvrsFkAEl3WwxhspBYFBIH3Vnykec79asqiUsSoA"
+academic_bearer = args.api_key
 streaming = tweepy.StreamingClient(academic_bearer)
 spark = SparkSession.builder.appName('twitter_app')\
     .master("local[*]")\
